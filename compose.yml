@@ -1,0 +1,128 @@
+
+networks:
+  monitoring-network:
+    driver: bridge
+    name: monitoring-network
+
+volumes:
+  timescaledb_data:
+
+services:
+  # --- INFRASTRUCTURE ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.3
+    hostname: zookeeper
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - monitoring-network
+    # 1. Healthcheck for Zookeeper
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  broker:
+    image: confluentinc/cp-kafka:7.4.3
+    hostname: broker
+    container_name: broker
+    depends_on:
+      zookeeper:
+        condition: service_healthy # Wait for Zookeeper to be fully ready
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - monitoring-network
+    # 2. Healthcheck for Kafka Broker
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg17
+    hostname: timescaledb
+    container_name: timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: monitoring
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - timescaledb_data:/var/lib/postgresql/data
+    networks:
+      - monitoring-network
+    # 3. Healthcheck for TimescaleDB (PostgreSQL)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d monitoring"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- MICROSERVICES ---
+  ingestion-api:
+    build: ./ingestion-api
+    hostname: ingestion-api
+    container_name: ingestion-api
+    ports:
+      - "3001:3001"
+    environment:
+      - KAFKA_BROKER=broker:29092
+    depends_on:
+      broker:
+        condition: service_healthy # 4. Wait until Kafka broker is strictly ready
+    networks:
+      - monitoring-network
+
+  db-worker:
+    build: ./db-worker
+    hostname: db-worker
+    container_name: db-worker
+    environment:
+      - KAFKA_BROKER=broker:29092
+      - DATABASE_URL=postgresql://admin:password@timescaledb:5432/monitoring
+    depends_on:
+      broker:
+        condition: service_healthy # 5. Wait for Kafka
+      timescaledb:
+        condition: service_healthy # 6. Wait for Database
+    networks:
+      - monitoring-network
+  query-api:
+    build: ./query-api
+    hostname: query-api
+    container_name: query-api
+    ports:
+      - "3002:3002"
+    environment:
+      - DATABASE_URL=postgresql://admin:password@timescaledb:5432/monitoring
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - monitoring-network
+  frontend:
+    build: ./frontend
+    hostname: frontend
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - ingestion-api
+      - query-api
+    networks:
+      - monitoring-network

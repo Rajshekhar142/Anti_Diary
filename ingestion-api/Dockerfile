@@ -9,7 +9,7 @@ COPY package.json ./
 RUN npm install
 
 # Copy the rest of the application code
-COPY index.js .
+COPY . .
 
 # Start the application
-CMD ["node", "index.js"]
+CMD ["npx", "tsx","index.js"]

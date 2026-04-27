@@ -12,4 +12,4 @@ RUN npm install --production
 COPY . .
 
 # Start the application
-CMD ["node", "index.js"]
+CMD ["npx", "tsx", "index.ts"]
